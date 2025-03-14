@@ -93,6 +93,7 @@ ssize_t input_sec(uint8_t *buf, size_t max_length) {
         free_tlv(server_hello_tlv);
 
         memcpy(buf, server_hello_data, server_hello_data_length);
+        print_tlv_bytes(server_hello_data, server_hello_data_length);
 
         // Move to finished phase
         phase = 2;
@@ -138,7 +139,7 @@ void output_sec(uint8_t *buf, size_t length) {
             exit(6); // Unexpected message
         }
 
-        // save client hello data
+        // Save client hello data
         memcpy(client_hello_data, buf, length);
         client_hello_data_length = length;
 
@@ -385,8 +386,7 @@ tlv *generate_server_hello() {
 
     // Add the certificate
     load_certificate("server_cert.bin");
-    tlv *certificate_tlv = create_tlv(CERTIFICATE);
-    add_val(certificate_tlv, certificate, cert_size);
+    tlv *certificate_tlv = deserialize_tlv(certificate, cert_size);
     add_tlv(server_hello_tlv, certificate_tlv);
 
     // Generate a server (emphemeral) public key, note: this is different from the public key in the
@@ -404,18 +404,22 @@ tlv *generate_server_hello() {
     load_private_key("server_key.bin");
 
     // Create signature
+    // Each TLV header adds at most 4 bytes (type is 1, length is either 1 or 3)
     uint8_t *handshake_signature_data =
-        (uint8_t *) malloc(client_hello_data_length + NONCE_SIZE + cert_size + pub_key_size);
+        (uint8_t *) malloc(client_hello_data_length + NONCE_SIZE + cert_size + pub_key_size + (4*4));
     
-    memcpy(handshake_signature_data, client_hello_data, client_hello_data_length);
-    memcpy(handshake_signature_data + client_hello_data_length, nonce, NONCE_SIZE);
-    memcpy(handshake_signature_data + client_hello_data_length + NONCE_SIZE, certificate, cert_size);
-    memcpy(handshake_signature_data + client_hello_data_length + NONCE_SIZE + cert_size, public_key,
-           pub_key_size);
+    int pos = 0;
+    tlv* client_hello_tlv_tmp = deserialize_tlv(client_hello_data, client_hello_data_length);
+
+    pos += serialize_tlv(handshake_signature_data, client_hello_tlv_tmp);
+    pos += serialize_tlv(handshake_signature_data + pos, nonce_tlv);
+    pos += serialize_tlv(handshake_signature_data + pos, certificate_tlv);
+    pos += serialize_tlv(handshake_signature_data + pos, public_key_tlv);
+
+    free_tlv(client_hello_tlv_tmp);
 
     uint8_t handshake_signature[SIGNATURE_MAX_SIZE];
-    size_t signature_size = sign(handshake_signature, handshake_signature_data,
-         client_hello_data_length + NONCE_SIZE + cert_size + pub_key_size);
+    size_t signature_size = sign(handshake_signature, handshake_signature_data, pos);
 
     tlv *handshake_signature_tlv = create_tlv(HANDSHAKE_SIGNATURE);
     add_val(handshake_signature_tlv, handshake_signature, signature_size);
