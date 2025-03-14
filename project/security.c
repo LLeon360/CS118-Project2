@@ -1,6 +1,7 @@
 #include "consts.h"
 #include "io.h"
 #include "libsecurity.h"
+#include "security.h"
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -93,7 +94,6 @@ ssize_t input_sec(uint8_t *buf, size_t max_length) {
         free_tlv(server_hello_tlv);
 
         memcpy(buf, server_hello_data, server_hello_data_length);
-        print_tlv_bytes(server_hello_data, server_hello_data_length);
 
         // Move to finished phase
         phase = 2;
@@ -136,7 +136,7 @@ void output_sec(uint8_t *buf, size_t length) {
         // If server, and in client hello phase
         tlv *client_hello_tlv = deserialize_tlv(buf, length);
         if (!client_hello_tlv) {
-            exit(6); // Unexpected message
+            exit(UNEXPECTED_MESSAGE);
         }
 
         // Save client hello data
@@ -147,7 +147,7 @@ void output_sec(uint8_t *buf, size_t length) {
         tlv *public_key_tlv = get_tlv(client_hello_tlv, PUBLIC_KEY);
         if (!public_key_tlv) {
             free_tlv(client_hello_tlv);
-            exit(6); // Unexpected message
+            exit(UNEXPECTED_MESSAGE);
         }
         
         load_peer_public_key(public_key_tlv->val, public_key_tlv->length);
@@ -161,7 +161,8 @@ void output_sec(uint8_t *buf, size_t length) {
         // If client, and in server hello phase
         tlv *server_hello_tlv = deserialize_tlv(buf, length);
         if (!server_hello_tlv) {
-            exit(6); // Unexpected message
+            fprintf(stderr, "Error: no server hello");
+            exit(UNEXPECTED_MESSAGE);
         }
 
         // Save server hello data for later verification
@@ -172,7 +173,8 @@ void output_sec(uint8_t *buf, size_t length) {
         tlv *certificate_tlv = get_tlv(server_hello_tlv, CERTIFICATE);
         if (!certificate_tlv) {
             free_tlv(server_hello_tlv);
-            exit(6); // Unexpected message
+            fprintf(stderr, "Error: no certificate");
+            exit(UNEXPECTED_MESSAGE);
         }
 
         // Extract DNS name and public key from certificate
@@ -182,7 +184,8 @@ void output_sec(uint8_t *buf, size_t length) {
 
         if (!dns_name_tlv || !cert_pubkey_tlv || !cert_sig_tlv) {
             free_tlv(server_hello_tlv);
-            exit(6); // Unexpected message
+            fprintf(stderr, "Error: certificate missing field");
+            exit(UNEXPECTED_MESSAGE);
         }
 
         // Load CA public key
@@ -191,38 +194,41 @@ void output_sec(uint8_t *buf, size_t length) {
         // Verify the certificate's signature
         // The data to verify is the DNS name and public key concatenated
         // Allocate sufficient buffer for the data
-        uint8_t *cert_data = malloc(dns_name_tlv->length + cert_pubkey_tlv->length + 16);
+        uint8_t *cert_data = malloc(dns_name_tlv->length + cert_pubkey_tlv->length + (2*4));
         if (!cert_data) {
             free_tlv(server_hello_tlv);
             exit(EXIT_FAILURE); // Memory allocation failure
         }
 
         // Copy the actual values 
-        memcpy(cert_data, dns_name_tlv->val, dns_name_tlv->length);
-        memcpy(cert_data + dns_name_tlv->length, cert_pubkey_tlv->val, cert_pubkey_tlv->length);
-
-        size_t cert_data_len = dns_name_tlv->length + cert_pubkey_tlv->length;
+        int cert_data_len = 0;
+        cert_data_len += serialize_tlv(cert_data, dns_name_tlv);
+        cert_data_len += serialize_tlv(cert_data + cert_data_len, cert_pubkey_tlv);
 
         if (!verify(cert_sig_tlv->val, cert_sig_tlv->length, cert_data, cert_data_len,
                     ec_ca_public_key)) {
             free(cert_data);
             free_tlv(server_hello_tlv);
-            exit(1); // Bad certificate
+            fprintf(stderr, "Error: certificate verification failed");
+            exit(BAD_CERTIFICATE);
         }
         free(cert_data);
 
         // Verify DNS name matches expected host
-        if (dns_name_tlv->length != strlen(__host) ||
-            memcmp(dns_name_tlv->val, __host, dns_name_tlv->length) != 0) {
+        // The tlv length counts the null byte in the name
+        if (dns_name_tlv->length != (strlen(__host) + 1) ||
+            strcmp(dns_name_tlv->val, __host) != 0) {
             free_tlv(server_hello_tlv);
-            exit(2); // Bad DNS name
+            fprintf(stderr, "Error: dns did not match");
+            exit(BAD_DNS);
         }
 
         // Get server's handshake signature
         tlv *handshake_sig_tlv = get_tlv(server_hello_tlv, HANDSHAKE_SIGNATURE);
         if (!handshake_sig_tlv) {
             free_tlv(server_hello_tlv);
-            exit(6); // Unexpected message
+            fprintf(stderr, "Error: no signature on server hello");
+            exit(UNEXPECTED_MESSAGE);
         }
 
         // Load server's public key from certificate to verify handshake signature
@@ -235,15 +241,13 @@ void output_sec(uint8_t *buf, size_t length) {
 
         if (!server_nonce_tlv || !server_ephemeral_key_tlv) {
             free_tlv(server_hello_tlv);
-            exit(6); // Unexpected message
+            fprintf(stderr, "Error: server hello missing fields");
+            exit(UNEXPECTED_MESSAGE);
         }
 
         // Allocate buffer for the handshake signature verification data
-        // Estimate size based on known components
-        size_t sig_data_len = client_hello_data_length + server_nonce_tlv->length +
-                              certificate_tlv->length + server_ephemeral_key_tlv->length +
-                              32; // Extra space for TLV headers
-        uint8_t *sig_data = malloc(sig_data_len);
+        size_t sig_data_len = 0;
+        uint8_t *sig_data = malloc(client_hello_data_length + server_hello_data_length);
         if (!sig_data) {
             free_tlv(server_hello_tlv);
             exit(EXIT_FAILURE);
@@ -252,29 +256,24 @@ void output_sec(uint8_t *buf, size_t length) {
         // Combine all data for signature verification
         // Copy client hello data
         memcpy(sig_data, client_hello_data, client_hello_data_length);
-        size_t offset = client_hello_data_length;
+        sig_data_len += client_hello_data_length;
 
         // Copy nonce value
-        memcpy(sig_data + offset, server_nonce_tlv->val, server_nonce_tlv->length);
-        offset += server_nonce_tlv->length;
+        sig_data_len += serialize_tlv(sig_data + sig_data_len, server_nonce_tlv);
 
         // Copy certificate value
-        memcpy(sig_data + offset, certificate_tlv->val, certificate_tlv->length);
-        offset += certificate_tlv->length;
+        sig_data_len += serialize_tlv(sig_data + sig_data_len, certificate_tlv);
 
         // Copy ephemeral public key value
-        memcpy(sig_data + offset, server_ephemeral_key_tlv->val, server_ephemeral_key_tlv->length);
-        offset += server_ephemeral_key_tlv->length;
-
-        // Actual length of combined data
-        sig_data_len = offset;
+        sig_data_len += serialize_tlv(sig_data + sig_data_len, server_ephemeral_key_tlv);
 
         // Verify handshake signature
         if (!verify(handshake_sig_tlv->val, handshake_sig_tlv->length, sig_data, sig_data_len,
                     ec_peer_public_key)) {
             free(sig_data);
             free_tlv(server_hello_tlv);
-            exit(3); // Bad signature
+            fprintf(stderr, "Error: invalid signature on server hello");
+            exit(BAD_SIGNATURE);
         }
         free(sig_data);
 
@@ -304,7 +303,7 @@ void output_sec(uint8_t *buf, size_t length) {
         // If server, and in finished phase
         tlv *finished_tlv = deserialize_tlv(buf, length);
         if (!finished_tlv) {
-            exit(6); // Unexpected message
+            exit(UNEXPECTED_MESSAGE); // Unexpected message
         }
 
         // Generate own HMAC digest
@@ -324,14 +323,14 @@ void output_sec(uint8_t *buf, size_t length) {
         if (!transcript_tlv) {
             free(combined_hello);
             free_tlv(finished_tlv);
-            exit(6); // Unexpected message
+            exit(UNEXPECTED_MESSAGE);
         }
 
         if (transcript_tlv->length != MAC_SIZE || 
             memcmp(transcript_tlv->val, transcript, MAC_SIZE) != 0) {
             free(combined_hello);
             free_tlv(finished_tlv);
-            exit(4); // Bad HMAC
+            exit(BAD_MAC);
         }
         
         // Cleanup memory
