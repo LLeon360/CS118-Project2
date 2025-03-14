@@ -18,7 +18,7 @@
 #define SECRET_SIZE 32
 #define MAC_SIZE 32
 #define IV_SIZE 16
-#define SIGNATURE_SIZE 72 // according to libsecurity documentation
+#define SIGNATURE_MAX_SIZE 72 // according to libsecurity documentation
 
 // Security types
 #define CLIENT_HELLO 0x10

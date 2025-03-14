@@ -413,12 +413,12 @@ tlv *generate_server_hello() {
     memcpy(handshake_signature_data + client_hello_data_length + NONCE_SIZE + cert_size, public_key,
            pub_key_size);
 
-    uint8_t handshake_signature[SIGNATURE_SIZE];
-    sign(handshake_signature, handshake_signature_data,
+    uint8_t handshake_signature[SIGNATURE_MAX_SIZE];
+    size_t signature_size = sign(handshake_signature, handshake_signature_data,
          client_hello_data_length + NONCE_SIZE + cert_size + pub_key_size);
 
     tlv *handshake_signature_tlv = create_tlv(HANDSHAKE_SIGNATURE);
-    add_val(handshake_signature_tlv, handshake_signature, SIGNATURE_SIZE);
+    add_val(handshake_signature_tlv, handshake_signature, signature_size);
     add_tlv(server_hello_tlv, handshake_signature_tlv);
 
     // restore the ephemeral key
