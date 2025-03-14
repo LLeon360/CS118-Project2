@@ -45,7 +45,7 @@ tlv *generate_finished();
 
 ssize_t input_sec(uint8_t *buf, size_t max_length) {
     if (__type == CLIENT && phase == 0) {
-        // If client, and client hello
+        // If client, and in client hello phase
         tlv *client_hello_tlv = generate_client_hello();
         if (!client_hello_tlv) {
             exit(EXIT_FAILURE); // Failed to create client hello
@@ -64,8 +64,8 @@ ssize_t input_sec(uint8_t *buf, size_t max_length) {
         return client_hello_data_length;
     }
     else if (__type == SERVER && phase == 1) {
-        // If server, and server hello
-        tlv *server_hello_tlv = generate_server_hello(client_hello_data, client_hello_data_length);
+        // If server, and in server hello phase
+        tlv *server_hello_tlv = generate_server_hello();
         if (!server_hello_tlv) {
             exit(EXIT_FAILURE); // Failed to create server hello
         }
@@ -100,7 +100,7 @@ ssize_t input_sec(uint8_t *buf, size_t max_length) {
         return server_hello_data_length;
     }
     else if (__type == CLIENT && phase == 2) {
-        // If client, and finished
+        // If client, and in finished phase
         tlv *finished_tlv = generate_finished();
         if (!finished_tlv) {
             exit(EXIT_FAILURE); // Failed to create finished
@@ -132,7 +132,7 @@ ssize_t input_sec(uint8_t *buf, size_t max_length) {
 
 void output_sec(uint8_t *buf, size_t length) {
     if (__type == SERVER && phase == 0) {
-        // If server, and client hello
+        // If server, and in client hello phase
         tlv *client_hello_tlv = deserialize_tlv(buf, length);
         if (!client_hello_tlv) {
             exit(6); // Unexpected message
@@ -157,7 +157,7 @@ void output_sec(uint8_t *buf, size_t length) {
         phase = 1;
     }
     else if (__type == CLIENT && phase == 1) {
-        // If client, and server hello
+        // If client, and in server hello phase
         tlv *server_hello_tlv = deserialize_tlv(buf, length);
         if (!server_hello_tlv) {
             exit(6); // Unexpected message
@@ -300,7 +300,7 @@ void output_sec(uint8_t *buf, size_t length) {
         phase = 2;
     }
     else if (__type == SERVER && phase == 2) {
-        // If server, and finished
+        // If server, and in finished phase
         tlv *finished_tlv = deserialize_tlv(buf, length);
         if (!finished_tlv) {
             exit(6); // Unexpected message
@@ -383,7 +383,13 @@ tlv *generate_server_hello() {
     add_val(nonce_tlv, nonce, NONCE_SIZE);
     add_tlv(server_hello_tlv, nonce_tlv);
 
-    // generate a server (emphemeral) public key, note: this is different from the public key in the
+    // Add the certificate
+    load_certificate("server_cert.bin");
+    tlv *certificate_tlv = create_tlv(CERTIFICATE);
+    add_val(certificate_tlv, certificate, cert_size);
+    add_tlv(server_hello_tlv, certificate_tlv);
+
+    // Generate a server (emphemeral) public key, note: this is different from the public key in the
     // certificate
     generate_private_key();
     EVP_PKEY *server_ephemeral_public_key = get_private_key();
@@ -394,19 +400,13 @@ tlv *generate_server_hello() {
     add_val(public_key_tlv, public_key, pub_key_size);
     add_tlv(server_hello_tlv, public_key_tlv);
 
-    load_certificate("server_cert.bin");
-
-    // add the certificate
-    tlv *certificate_tlv = create_tlv(CERTIFICATE);
-    add_val(certificate_tlv, certificate, cert_size);
-    add_tlv(server_hello_tlv, certificate_tlv);
-
-    // sign over the client hello data, Nonce, certificate, and (ephemeral) public key data
+    // Sign over the client hello data, Nonce, certificate, and (ephemeral) public key data
     load_private_key("server_key.bin");
 
-    // malloc
+    // Create signature
     uint8_t *handshake_signature_data =
-        (uint8_t *)malloc(client_hello_data_length + NONCE_SIZE + cert_size + pub_key_size);
+        (uint8_t *) malloc(client_hello_data_length + NONCE_SIZE + cert_size + pub_key_size);
+    
     memcpy(handshake_signature_data, client_hello_data, client_hello_data_length);
     memcpy(handshake_signature_data + client_hello_data_length, nonce, NONCE_SIZE);
     memcpy(handshake_signature_data + client_hello_data_length + NONCE_SIZE, certificate, cert_size);
