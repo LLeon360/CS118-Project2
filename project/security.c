@@ -120,11 +120,60 @@ ssize_t input_sec(uint8_t *buf, size_t max_length) {
     else if (phase == 3) {
         // If data read from stdin
         // Encrypt data
-        ssize_t input_len = input_io(buf, max_length);
 
-        // TODO: Implement data encryption
-        // For now, just return the input data length
-        return input_len;
+
+        uint8_t *input_buf = malloc(max_length);
+
+        const ssize_t MAX_PLAINTEXT_LENGTH = ((max_length - 60) / 16) * 16 - 1;
+        // let's just assume it's -60, and we aren't transmitting a ciphertext so small that the length fits in 1 byte instead of 2
+
+        ssize_t input_len = input_io(input_buf, MAX_PLAINTEXT_LENGTH);
+
+
+        uint8_t* iv_buf = malloc(IV_SIZE);
+        uint8_t* ciphertext_buf = malloc(max_length); // idk what size this should be. 1024?
+
+        ssize_t ciphertext_len = encrypt_data(iv_buf, ciphertext_buf, input_buf, input_len);
+
+        // Create IV TLV
+        tlv* IV_tlv = create_tlv(IV);
+        add_val(IV_tlv, iv_buf, IV_SIZE);
+
+        // Create Ciphertext TLV
+        tlv* ciphertext_tlv = create_tlv(CIPHERTEXT);
+        add_val(ciphertext_tlv, ciphertext_buf, ciphertext_len);
+
+        uint8_t* hmac_digest = malloc(MAC_SIZE);
+
+        hmac_iv_ciphertext(hmac_digest, IV_tlv, ciphertext_tlv);
+
+        // Create HMAC TLV
+        tlv* MAC_tlv = create_tlv(MAC);
+        add_val(MAC_tlv, hmac_digest, MAC_SIZE);
+
+        // Create Data TLV
+        tlv* data_tlv = create_tlv(DATA);
+        add_tlv(data_tlv, IV_tlv);
+        add_tlv(data_tlv, ciphertext_tlv);
+        add_tlv(data_tlv, MAC_tlv);
+
+
+
+        // Copy Data TLV to output
+        uint8_t* data_tlv_buf = malloc(max_length);
+        size_t data_length = serialize_tlv(data_tlv, data_tlv_buf);
+        memcpy(buf, data_tlv_buf, data_length);
+
+
+        free(input_buf);
+        free(iv_buf);
+        free(ciphertext_buf);
+
+        free(hmac_digest);
+        free(data_tlv_buf);
+        
+
+        return data_length;
     }
 
     return 0;
@@ -341,10 +390,29 @@ void output_sec(uint8_t *buf, size_t length) {
         phase = 3;
     }
     else if (phase == 3) {
-        // TODO: Implement data decryption
-        // For now, just output the raw data
-    }
+        
+        tlv* data_tlv = deserialize_tlv(buf, length);
+        tlv* IV_tlv = get_tlv(data_tlv, IV);
+        tlv* ciphertext_tlv = get_tlv(data_tlv, CIPHERTEXT);
+        tlv* MAC_tlv = get_tlv(data_tlv, MAC);
 
+        // TODO: check if tlvs are NULL, then exit with proper status code
+
+        uint8_t* calculated_hmac_digest = malloc(MAC_SIZE);
+        hmac_iv_ciphertext(calculated_hmac_digest, IV_tlv, ciphertext_tlv);
+
+        if (MAC_tlv->length != MAC_SIZE ||
+            memcmp(MAC_tlv->val, calculated_hmac_digest, MAC_SIZE) != 0) {
+            
+            free(calculated_hmac_digest);
+            free_tlv(data_tlv);
+            exit(BAD_MAC);
+        }
+
+        decrypt_cipher(buf, ciphertext_tlv -> val, ciphertext_tlv->length, IV_tlv->val);
+
+
+    }
     // decrypt first
     output_io(buf, length);
 }
@@ -453,3 +521,24 @@ tlv *generate_finished() {
     return finished_tlv;
 }
 
+// calculates hmac from IV_tlv and ciphertext_tlv, returns it into hmac_digest
+void hmac_iv_ciphertext(uint8_t* hmac_digest, tlv* IV_tlv, tlv* ciphertext_tlv) {
+    // Smoosh IV + Ciphertext together to calculate HMAC
+    uint8_t* IV_tlv_serialized = malloc(IV_SIZE + 2);
+    uint8_t* ciphertext_tlv_serialized = malloc(1024); // TODO: fix this hard coding
+
+    size_t IV_tlv_serial_length = serialize_tlv(IV_tlv_serialized, IV_tlv);
+    size_t ciphertext_tlv_serial_length = serialize_tlv(ciphertext_tlv_serialized, ciphertext_tlv);
+    size_t IV_ciphertext_length = IV_tlv_serial_length + ciphertext_tlv_serial_length;
+
+    uint8_t* IV_plus_ciphertext = malloc(IV_ciphertext_length);
+    memcpy(IV_plus_ciphertext, IV_tlv_serialized, IV_tlv_serial_length);
+    memcpy(IV_plus_ciphertext + IV_tlv_serial_length, ciphertext_tlv_serialized, ciphertext_tlv_serial_length);
+
+    // Calculate HMAC from IV + Ciphertext (serialized versions)
+    hmac(hmac_digest, IV_plus_ciphertext, IV_ciphertext_length);
+
+    free(IV_tlv_serialized);
+    free(ciphertext_tlv_serialized);
+    free(IV_plus_ciphertext);
+}
