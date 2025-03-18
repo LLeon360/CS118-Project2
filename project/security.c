@@ -121,17 +121,14 @@ ssize_t input_sec(uint8_t *buf, size_t max_length) {
         // If data read from stdin
         // Encrypt data
 
-
         uint8_t *input_buf = malloc(max_length);
 
         const ssize_t MAX_PLAINTEXT_LENGTH = ((max_length - 60) / 16) * 16 - 1;
         // let's just assume it's -60, and we aren't transmitting a ciphertext so small that the length fits in 1 byte instead of 2
 
         ssize_t input_len = input_io(input_buf, MAX_PLAINTEXT_LENGTH);
-
-
         uint8_t* iv_buf = malloc(IV_SIZE);
-        uint8_t* ciphertext_buf = malloc(max_length); // idk what size this should be. 1024?
+        uint8_t* ciphertext_buf = malloc(MAX_PLAINTEXT_LENGTH + 16); // ciphertext can be up to 16 bytes larger than plaintext
 
         ssize_t ciphertext_len = encrypt_data(iv_buf, ciphertext_buf, input_buf, input_len);
 
@@ -145,7 +142,7 @@ ssize_t input_sec(uint8_t *buf, size_t max_length) {
 
         uint8_t* hmac_digest = malloc(MAC_SIZE);
 
-        hmac_iv_ciphertext(hmac_digest, IV_tlv, ciphertext_tlv);
+        hmac_iv_ciphertext(hmac_digest, IV_tlv, ciphertext_tlv, ciphertext_len);
 
         // Create HMAC TLV
         tlv* MAC_tlv = create_tlv(MAC);
@@ -157,25 +154,20 @@ ssize_t input_sec(uint8_t *buf, size_t max_length) {
         add_tlv(data_tlv, ciphertext_tlv);
         add_tlv(data_tlv, MAC_tlv);
 
-
-
         // Copy Data TLV to output
         uint8_t* data_tlv_buf = malloc(max_length);
-        size_t data_length = serialize_tlv(data_tlv, data_tlv_buf);
+        size_t data_length = serialize_tlv(data_tlv_buf, data_tlv);
         memcpy(buf, data_tlv_buf, data_length);
-
 
         free(input_buf);
         free(iv_buf);
         free(ciphertext_buf);
 
         free(hmac_digest);
-        free(data_tlv_buf);
-        
+        free(data_tlv_buf); 
 
         return data_length;
     }
-
     return 0;
 }
 
@@ -392,14 +384,30 @@ void output_sec(uint8_t *buf, size_t length) {
     else if (phase == 3) {
         
         tlv* data_tlv = deserialize_tlv(buf, length);
+        if (!data_tlv) {
+            exit(UNEXPECTED_MESSAGE);
+        }
         tlv* IV_tlv = get_tlv(data_tlv, IV);
+        if (!IV_tlv) {
+            free_tlv(data_tlv);
+            exit(UNEXPECTED_MESSAGE);
+        }
         tlv* ciphertext_tlv = get_tlv(data_tlv, CIPHERTEXT);
+        if (!ciphertext_tlv) {
+            free_tlv(data_tlv);
+            exit(UNEXPECTED_MESSAGE);
+        }
         tlv* MAC_tlv = get_tlv(data_tlv, MAC);
+        if (!MAC_tlv) {
+            free_tlv(data_tlv);
+            exit(UNEXPECTED_MESSAGE);
+        }
 
-        // TODO: check if tlvs are NULL, then exit with proper status code
+        // get ciphertext len
+        size_t ciphertext_length = ciphertext_tlv->length;
 
         uint8_t* calculated_hmac_digest = malloc(MAC_SIZE);
-        hmac_iv_ciphertext(calculated_hmac_digest, IV_tlv, ciphertext_tlv);
+        hmac_iv_ciphertext(calculated_hmac_digest, IV_tlv, ciphertext_tlv, ciphertext_length);
 
         if (MAC_tlv->length != MAC_SIZE ||
             memcmp(MAC_tlv->val, calculated_hmac_digest, MAC_SIZE) != 0) {
@@ -409,12 +417,11 @@ void output_sec(uint8_t *buf, size_t length) {
             exit(BAD_MAC);
         }
 
-        decrypt_cipher(buf, ciphertext_tlv -> val, ciphertext_tlv->length, IV_tlv->val);
-
-
+        size_t plaintext_len = decrypt_cipher(buf, ciphertext_tlv -> val, ciphertext_length, IV_tlv->val);
+        
+        // output decrypted data to stdout
+        output_io(buf, plaintext_len);
     }
-    // decrypt first
-    output_io(buf, length);
 }
 
 // Generate a client hello TLV and return it
@@ -522,10 +529,10 @@ tlv *generate_finished() {
 }
 
 // calculates hmac from IV_tlv and ciphertext_tlv, returns it into hmac_digest
-void hmac_iv_ciphertext(uint8_t* hmac_digest, tlv* IV_tlv, tlv* ciphertext_tlv) {
+void hmac_iv_ciphertext(uint8_t* hmac_digest, tlv* IV_tlv, tlv* ciphertext_tlv, size_t ciphertext_length) {
     // Smoosh IV + Ciphertext together to calculate HMAC
     uint8_t* IV_tlv_serialized = malloc(IV_SIZE + 2);
-    uint8_t* ciphertext_tlv_serialized = malloc(1024); // TODO: fix this hard coding
+    uint8_t* ciphertext_tlv_serialized = malloc(ciphertext_length + 4); // pass in the length of the ciphertext + 1 byte for type + 3 bytes for length
 
     size_t IV_tlv_serial_length = serialize_tlv(IV_tlv_serialized, IV_tlv);
     size_t ciphertext_tlv_serial_length = serialize_tlv(ciphertext_tlv_serialized, ciphertext_tlv);
